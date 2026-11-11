@@ -1,0 +1,32 @@
+{
+    "settings": {
+        "stagger_interval_ms": 500,
+        "logon_check_shell": true,
+        "shell_timeout_sec": 30,
+        "auto_close_timeout_sec": 300,
+        "max_log_lines": 200,
+        "window_width": 860,
+        "window_height": 600,
+        "launch_order": []
+    },
+    "overrides": [
+        {
+            "match_name": "Discord*",
+            "enabled_watch": true,
+            "run_as_admin": false,
+            "auto_close_window": false,
+            "watch_process_name": "Discord",
+            "arguments": "",
+            "hidden": false
+        },
+        {
+            "match_name": "sample_service.bat",
+            "enabled_watch": false,
+            "run_as_admin": false,
+            "auto_close_window": false,
+            "watch_process_name": "sample_worker",
+            "arguments": "--run",
+            "hidden": true
+        }
+    ]
+}
