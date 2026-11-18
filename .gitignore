@@ -1,8 +1,4 @@
 config.json
 launcher.log
-*.log
-dist/
-bin/
-obj/
 *.exe
-*.zip
+dist/

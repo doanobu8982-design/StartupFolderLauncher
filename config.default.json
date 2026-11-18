@@ -11,6 +11,18 @@
     },
     "overrides": [
         {
+            "match_name": "LINE.lnk",
+            "enabled_watch": true,
+            "run_as_admin": false,
+            "auto_close_window": true,
+            "auto_close_profile": {
+                "wait_process": "LineMediaPlayer"
+            },
+            "watch_process_name": "LINE",
+            "arguments": "",
+            "hidden": false
+        },
+        {
             "match_name": "Discord*",
             "enabled_watch": true,
             "run_as_admin": false,

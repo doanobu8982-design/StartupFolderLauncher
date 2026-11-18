@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # 1. C# ソースコードの自動クリーンコンパイル（launcher.exe & 管理画面を開く.exe）
       - name: Compile C# Sources
@@ -42,9 +44,12 @@ jobs:
 
           New-Item -ItemType Directory -Force -Path "dist/package" | Out-Null
 
-          # 公開用クリーンファイルをパッケージフォルダへ集約
+          # 公開用クリーンファイルをパッケージフォルダへ集約（.git, .github, .gitignore, dist は除外）
           Get-ChildItem -Path . -Exclude ".git", ".github", ".gitignore", "dist" |
             Copy-Item -Destination "dist/package" -Recurse -Force
+
+          # コンパイル済み .exe に同梱不要な .cs ソースをパッケージから除外
+          Get-ChildItem -Path "dist/package" -Include "*.cs" -Recurse | Remove-Item -Force
 
           # ZIP 圧縮
           Compress-Archive -Path "dist/package/*" -DestinationPath "dist/$zipName"

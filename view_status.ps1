@@ -170,6 +170,7 @@ function Save-Config {
     param([object]$ConfigObj)
     try {
         $jsonStr = $ConfigObj | ConvertTo-Json -Depth 5
+        $script:selfConfigWriteUntil = (Get-Date).AddMilliseconds(800)
         [System.IO.File]::WriteAllText($configFile, $jsonStr, [System.Text.Encoding]::UTF8)
         return $true
     } catch {
@@ -658,16 +659,35 @@ $buttonPanel.Controls.Add($btnSyncNow)
 
 $mainTable.Controls.Add($buttonPanel, 0, 3)
 
-# Data Refresh Function
+# Script-scope state variables
 $script:isLoading = $false
-$script:lastLogLength = 0
+$script:isUserInteracting = $false
+$script:lastLogLength = [long]0
+$script:lastProcessStatusMap = @{}
+$script:selfConfigWriteUntil = [datetime]::MinValue
+$script:pendingLogUpdate = $false
+$script:pendingStructureReload = $false
+$script:wasMinimized = $false
+$script:debounceTimer = $null
+$script:logWatcher = $null
+$script:folderWatcher = $null
+$script:configWatcher = $null
 
 $refreshData = {
     $script:isLoading = $true
+    $selectedFileName = $null
+    if ($grid.SelectedRows.Count -gt 0) {
+        $selectedFileName = [string]$grid.SelectedRows[0].Tag
+    } elseif ($null -ne $grid.CurrentRow) {
+        $selectedFileName = [string]$grid.CurrentRow.Tag
+    }
+    $firstDisplayedIndex = $grid.FirstDisplayedScrollingRowIndex
+
     $grid.SuspendLayout()
     try {
         $cfg = Get-LocalConfig
         $grid.Rows.Clear()
+        $script:lastProcessStatusMap = @{}
 
         $supportedExts = @(".lnk", ".exe", ".bat", ".cmd")
 
@@ -719,6 +739,7 @@ $refreshData = {
                 )
                 $row = $grid.Rows[$rowIndex]
                 $row.Tag = $info.FileName
+                $script:lastProcessStatusMap[$info.FileName] = [bool]$info.IsRunning
                 if ($info.IsRunning) {
                     $row.DefaultCellStyle.ForeColor = [System.Drawing.Color]::DarkGreen
                 } else {
@@ -754,7 +775,77 @@ $refreshData = {
         }
     } finally {
         $grid.ResumeLayout()
+
+        # Restore selected row and scroll position
+        if (-not [string]::IsNullOrEmpty($selectedFileName)) {
+            foreach ($r in $grid.Rows) {
+                if ([string]$r.Tag -eq $selectedFileName) {
+                    $grid.ClearSelection()
+                    $r.Selected = $true
+                    $grid.CurrentCell = $r.Cells[0]
+                    break
+                }
+            }
+        }
+        if ($firstDisplayedIndex -ge 0 -and $firstDisplayedIndex -lt $grid.Rows.Count) {
+            try {
+                $grid.FirstDisplayedScrollingRowIndex = $firstDisplayedIndex
+            } catch {}
+        }
+
         $script:isLoading = $false
+    }
+}
+
+# Lightweight Differential Process Status Update (Pinpoint Row Update)
+$updateAppStatuses = {
+    if ($script:isLoading -or $script:isUserInteracting) { return }
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) { return }
+    if ($grid.Rows.Count -eq 0) { return }
+
+    $runningSet = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
+        if (-not [string]::IsNullOrWhiteSpace($p.ProcessName)) {
+            [void]$runningSet.Add($p.ProcessName)
+        }
+    }
+
+    $changedRows = [System.Collections.ArrayList]::new()
+    foreach ($row in $grid.Rows) {
+        $watchProcName = [string]$row.Cells[6].Value
+        $isNowRunning = $false
+        if (-not [string]::IsNullOrWhiteSpace($watchProcName)) {
+            $isNowRunning = $runningSet.Contains($watchProcName)
+        }
+
+        $fileName = if ($null -ne $row.Tag -and [string]$row.Tag -ne "") { [string]$row.Tag } else { [string]$row.Cells[4].Value }
+        $currentCellRunning = ([string]$row.Cells[5].Value -eq "🟢 稼働中")
+        $hasCached = $script:lastProcessStatusMap.ContainsKey($fileName)
+        $cachedRunning = if ($hasCached) { [bool]$script:lastProcessStatusMap[$fileName] } else { $currentCellRunning }
+
+        if (($currentCellRunning -ne $isNowRunning) -or ($cachedRunning -ne $isNowRunning)) {
+            [void]$changedRows.Add([PSCustomObject]@{
+                Row       = $row
+                FileName  = $fileName
+                IsRunning = $isNowRunning
+            })
+        }
+    }
+
+    if ($changedRows.Count -eq 0) { return }
+
+    $prevLoading = $script:isLoading
+    $script:isLoading = $true
+    try {
+        foreach ($item in $changedRows) {
+            $r = $item.Row
+            $nowRun = $item.IsRunning
+            $r.Cells[5].Value = if ($nowRun) { "🟢 稼働中" } else { "⚪ 停止中" }
+            $r.DefaultCellStyle.ForeColor = if ($nowRun) { [System.Drawing.Color]::DarkGreen } else { [System.Drawing.Color]::Gray }
+            $script:lastProcessStatusMap[$item.FileName] = $nowRun
+        }
+    } finally {
+        $script:isLoading = $prevLoading
     }
 }
 
@@ -797,11 +888,40 @@ $updateLogDiff = {
     }
 }
 
-# 2-second safe differential log monitoring timer
+# 2-second fallback & process status monitoring timer
 $logTimer = New-Object System.Windows.Forms.Timer
 $logTimer.Interval = 2000
 $logTimer.Add_Tick({
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+        return
+    }
     & $updateLogDiff
+    & $updateAppStatuses
+})
+
+# 250ms debounce timer for FileSystemWatcher events
+$script:debounceTimer = New-Object System.Windows.Forms.Timer
+$script:debounceTimer.Interval = 250
+$script:debounceTimer.Add_Tick({
+    $script:debounceTimer.Stop()
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+        return
+    }
+    if ($script:isLoading -or $script:isUserInteracting) {
+        $script:debounceTimer.Start()
+        return
+    }
+    if ($script:pendingStructureReload) {
+        $script:pendingStructureReload = $false
+        $script:pendingLogUpdate = $false
+        & $refreshData
+        return
+    }
+    if ($script:pendingLogUpdate) {
+        $script:pendingLogUpdate = $false
+        & $updateLogDiff
+        & $updateAppStatuses
+    }
 })
 
 # Grid Checkbox Auto-Commit and Event Handling
@@ -816,19 +936,24 @@ $grid.Add_CellValueChanged({
     if ($script:isLoading) { return }
     if ($e.RowIndex -lt 0) { return }
 
-    $row = $grid.Rows[$e.RowIndex]
-    $fn = if ($null -ne $row.Tag -and [string]$row.Tag -ne "") { [string]$row.Tag } else { [string]$row.Cells[4].Value }
-    $tp = [string]$row.Cells[7].Value
+    $script:isUserInteracting = $true
+    try {
+        $row = $grid.Rows[$e.RowIndex]
+        $fn = if ($null -ne $row.Tag -and [string]$row.Tag -ne "") { [string]$row.Tag } else { [string]$row.Cells[4].Value }
+        $tp = [string]$row.Cells[7].Value
 
-    if ($e.ColumnIndex -eq 1) {
-        $newChecked = [bool]$row.Cells[1].Value
-        Set-ItemConfig -FileName $fn -TargetPath $tp -EnabledWatch $newChecked | Out-Null
-    } elseif ($e.ColumnIndex -eq 2) {
-        $newAdmin = [bool]$row.Cells[2].Value
-        Set-ItemConfig -FileName $fn -TargetPath $tp -RunAsAdmin $newAdmin | Out-Null
-    } elseif ($e.ColumnIndex -eq 3) {
-        $newClose = [bool]$row.Cells[3].Value
-        Set-ItemConfig -FileName $fn -TargetPath $tp -AutoCloseWindow $newClose | Out-Null
+        if ($e.ColumnIndex -eq 1) {
+            $newChecked = [bool]$row.Cells[1].Value
+            Set-ItemConfig -FileName $fn -TargetPath $tp -EnabledWatch $newChecked | Out-Null
+        } elseif ($e.ColumnIndex -eq 2) {
+            $newAdmin = [bool]$row.Cells[2].Value
+            Set-ItemConfig -FileName $fn -TargetPath $tp -RunAsAdmin $newAdmin | Out-Null
+        } elseif ($e.ColumnIndex -eq 3) {
+            $newClose = [bool]$row.Cells[3].Value
+            Set-ItemConfig -FileName $fn -TargetPath $tp -AutoCloseWindow $newClose | Out-Null
+        }
+    } finally {
+        $script:isUserInteracting = $false
     }
 })
 
@@ -869,14 +994,19 @@ $btnMoveUp.Add_Click({
     $idx = $grid.SelectedRows[0].Index
     if ($idx -le 0) { return }
 
-    $row = $grid.Rows[$idx]
-    $grid.Rows.RemoveAt($idx)
-    $grid.Rows.Insert($idx - 1, $row)
-    $grid.ClearSelection()
-    $grid.Rows[$idx - 1].Selected = $true
-    $grid.CurrentCell = $grid.Rows[$idx - 1].Cells[0]
+    $script:isUserInteracting = $true
+    try {
+        $row = $grid.Rows[$idx]
+        $grid.Rows.RemoveAt($idx)
+        $grid.Rows.Insert($idx - 1, $row)
+        $grid.ClearSelection()
+        $grid.Rows[$idx - 1].Selected = $true
+        $grid.CurrentCell = $grid.Rows[$idx - 1].Cells[0]
 
-    & $saveCurrentOrder
+        & $saveCurrentOrder
+    } finally {
+        $script:isUserInteracting = $false
+    }
 })
 
 $btnMoveDown.Add_Click({
@@ -884,14 +1014,19 @@ $btnMoveDown.Add_Click({
     $idx = $grid.SelectedRows[0].Index
     if ($idx -ge $grid.Rows.Count - 1) { return }
 
-    $row = $grid.Rows[$idx]
-    $grid.Rows.RemoveAt($idx)
-    $grid.Rows.Insert($idx + 1, $row)
-    $grid.ClearSelection()
-    $grid.Rows[$idx + 1].Selected = $true
-    $grid.CurrentCell = $grid.Rows[$idx + 1].Cells[0]
+    $script:isUserInteracting = $true
+    try {
+        $row = $grid.Rows[$idx]
+        $grid.Rows.RemoveAt($idx)
+        $grid.Rows.Insert($idx + 1, $row)
+        $grid.ClearSelection()
+        $grid.Rows[$idx + 1].Selected = $true
+        $grid.CurrentCell = $grid.Rows[$idx + 1].Cells[0]
 
-    & $saveCurrentOrder
+        & $saveCurrentOrder
+    } finally {
+        $script:isUserInteracting = $false
+    }
 })
 
 $btnEditWatch.Add_Click({
@@ -904,9 +1039,14 @@ $btnEditWatch.Add_Click({
     $selWatchName = [string]$selRow.Cells[6].Value
     $selTargetPath = [string]$selRow.Cells[7].Value
 
-    $dlgRes = Show-ProcessPickerDialog -TargetFileName $selFileName -CurrentWatchProcess $selWatchName -TargetPath $selTargetPath
-    if ($dlgRes -eq [System.Windows.Forms.DialogResult]::OK) {
-        & $refreshData
+    $script:isUserInteracting = $true
+    try {
+        $dlgRes = Show-ProcessPickerDialog -TargetFileName $selFileName -CurrentWatchProcess $selWatchName -TargetPath $selTargetPath
+        if ($dlgRes -eq [System.Windows.Forms.DialogResult]::OK) {
+            & $refreshData
+        }
+    } finally {
+        $script:isUserInteracting = $false
     }
 })
 
@@ -927,9 +1067,113 @@ $btnSyncNow.Add_Click({
     }
 })
 
-# Initial Data Load and Start Timer
+# Sync immediately when restored from minimized state
+$form.Add_Resize({
+    if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+        $script:wasMinimized = $true
+        return
+    }
+    if ($script:wasMinimized) {
+        $script:wasMinimized = $false
+        if ($script:pendingStructureReload) {
+            $script:pendingStructureReload = $false
+            $script:pendingLogUpdate = $false
+            & $refreshData
+        } else {
+            $script:pendingLogUpdate = $false
+            & $updateLogDiff
+            & $updateAppStatuses
+        }
+    }
+})
+
+# Initial Data Load, FileSystemWatchers Setup, and Start Timer
 $form.Add_Shown({
     & $refreshData
+
+    # 1. Log watcher (launcher.log)
+    try {
+        if (Test-Path -LiteralPath $scriptRoot) {
+            $lw = New-Object System.IO.FileSystemWatcher
+            $lw.Path = $scriptRoot
+            $lw.Filter = "launcher.log"
+            $lw.NotifyFilter = [System.IO.NotifyFilters]::LastWrite -bor [System.IO.NotifyFilters]::Size -bor [System.IO.NotifyFilters]::FileName
+            $lw.SynchronizingObject = $form
+
+            $onLogChanged = {
+                param($sender, $e)
+                $script:pendingLogUpdate = $true
+                if ($null -ne $script:debounceTimer) {
+                    $script:debounceTimer.Stop()
+                    $script:debounceTimer.Start()
+                }
+            }
+            $lw.Add_Changed($onLogChanged)
+            $lw.Add_Created($onLogChanged)
+            $lw.Add_Renamed($onLogChanged)
+            $lw.EnableRaisingEvents = $true
+            $script:logWatcher = $lw
+        }
+    } catch {}
+
+    # 2. Startup folder watcher
+    try {
+        if (Test-Path -LiteralPath $startupDir) {
+            $fw = New-Object System.IO.FileSystemWatcher
+            $fw.Path = $startupDir
+            $fw.Filter = "*.*"
+            $fw.NotifyFilter = [System.IO.NotifyFilters]::FileName -bor [System.IO.NotifyFilters]::LastWrite
+            $fw.SynchronizingObject = $form
+
+            $onFolderChanged = {
+                param($sender, $e)
+                $ext = [System.IO.Path]::GetExtension([string]$e.Name).ToLowerInvariant()
+                $oldExt = ""
+                if ($e -is [System.IO.RenamedEventArgs]) {
+                    $oldExt = [System.IO.Path]::GetExtension([string]$e.OldName).ToLowerInvariant()
+                }
+                if ($ext -in @(".lnk", ".exe", ".bat", ".cmd") -or $oldExt -in @(".lnk", ".exe", ".bat", ".cmd")) {
+                    $script:pendingStructureReload = $true
+                    if ($null -ne $script:debounceTimer) {
+                        $script:debounceTimer.Stop()
+                        $script:debounceTimer.Start()
+                    }
+                }
+            }
+            $fw.Add_Created($onFolderChanged)
+            $fw.Add_Deleted($onFolderChanged)
+            $fw.Add_Renamed($onFolderChanged)
+            $fw.EnableRaisingEvents = $true
+            $script:folderWatcher = $fw
+        }
+    } catch {}
+
+    # 3. Config file watcher (config.json)
+    try {
+        if (Test-Path -LiteralPath $scriptRoot) {
+            $cw = New-Object System.IO.FileSystemWatcher
+            $cw.Path = $scriptRoot
+            $cw.Filter = "config.json"
+            $cw.NotifyFilter = [System.IO.NotifyFilters]::LastWrite -bor [System.IO.NotifyFilters]::Size
+            $cw.SynchronizingObject = $form
+
+            $onConfigChanged = {
+                param($sender, $e)
+                if ((Get-Date) -gt $script:selfConfigWriteUntil) {
+                    $script:pendingStructureReload = $true
+                    if ($null -ne $script:debounceTimer) {
+                        $script:debounceTimer.Stop()
+                        $script:debounceTimer.Start()
+                    }
+                }
+            }
+            $cw.Add_Changed($onConfigChanged)
+            $cw.Add_Created($onConfigChanged)
+            $cw.EnableRaisingEvents = $true
+            $script:configWatcher = $cw
+        }
+    } catch {}
+
     $logTimer.Start()
 })
 
@@ -939,6 +1183,18 @@ $form.Add_FormClosed({
     if ($null -ne $logTimer) {
         $logTimer.Stop()
         $logTimer.Dispose()
+    }
+    if ($null -ne $script:debounceTimer) {
+        $script:debounceTimer.Stop()
+        $script:debounceTimer.Dispose()
+    }
+    foreach ($w in @($script:logWatcher, $script:folderWatcher, $script:configWatcher)) {
+        if ($null -ne $w) {
+            try {
+                $w.EnableRaisingEvents = $false
+                $w.Dispose()
+            } catch {}
+        }
     }
 })
 

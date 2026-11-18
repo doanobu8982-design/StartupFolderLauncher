@@ -2,109 +2,79 @@
 
 [Japanese Documentation (README.md)](README.md)
 
-**StartupFolderLauncher** is a portable Windows startup launcher that preserves the simple drag-and-drop convenience of the standard Windows Startup folder, while adding:
-- **Run as Administrator** without UAC confirmation dialogs
-- **Custom startup order reordering** via GUI
-- **Shell / Taskbar readiness wait** to prevent missing system tray icons
-- **Zero console window flashing (`launcher.exe`)** using an ultra-lightweight native C# binary
-- **Automated process watchdog and recovery** upon workstation unlock
-
-All items are managed inside a single unified `スタートアップ` (Startup) folder. Privilege switching, ordering, and watchdog toggles can all be controlled with one click in the intuitive desktop GUI.
+**StartupFolderLauncher** is a portable Windows startup launcher that keeps the drag-and-drop simplicity of the Windows Startup folder while adding **UAC-free elevated launch**, **GUI startup reordering**, **zero console window flashing**, **smart auto-tray-minimize (with two-stage startup protection for apps like LINE)**, and **opt-in process watchdog recovery on workstation unlock**.
 
 ---
 
-## 1. Key Features & Architecture
+## Quick Start (3 Steps)
 
-* **Zero Console Window Flashing (`launcher.exe`)**:
-  * Employs an ultra-compact native GUI binary compiled with Windows standard C# compiler (`csc.exe`).
-  * Completely eliminates the 0.05-second console flash that occurred with `powershell.exe -WindowStyle Hidden`.
-* **Unified Folder & GUI Privilege Toggling**:
-  * Store all shortcuts and executables in a single `スタートアップ` folder.
-  * Toggling the "管理者" (Admin) checkbox in the GUI runs the application with elevated privileges (UAC prompt skipped). Standard user execution runs safely via Explorer's `Shell.Application` COM interface.
-* **Custom Startup Ordering**:
-  * Use "▲ Up" and "▼ Down" buttons in the GUI to arrange startup sequence. Applications launch sequentially according to this order.
-* **Window Size Memory**:
-  * Automatically saves window dimensions upon closing and restores them on the next run.
-* **Flicker-Free GUI & Differential Real-Time Log Streaming**:
-  * DataGridView uses double-buffering and redraw locking to eliminate visual flicker.
-  * Safe 2-second timer automatically appends and scrolls only new log entries without redrawing the entire form.
-* **Automatic UAC Elevation for Batch Files**:
-  * `インストール.bat` and `アンインストール.bat` automatically trigger UAC elevation when double-clicked.
-* **Taskbar Readiness Check**:
-  * Detects when `Shell_TrayWnd` is ready via Win32 API before launching apps to ensure tray icons register properly.
+1. **Download the latest release ZIP** (e.g., `StartupFolderLauncher_v1.1.0.zip`) from the [Releases page](https://github.com/doanobu8982-design/StartupFolderLauncher/releases/latest) and extract it to a permanent folder (e.g., `C:\Tools\StartupFolderLauncher`).
+2. **Drop your shortcuts (`.lnk`) or executables (`.exe`, `.bat`, `.cmd`)** into the **`スタートアップ`** folder.
+3. **Double-click `インストール.bat`** and accept the UAC prompt to register the scheduled tasks.
+
+> Use **`管理画面を開く.exe`** anytime to reorder apps, toggle Administrator privileges, or configure the watchdog via GUI.
+
+---
+
+## Key Features
+
+* **Zero Console Window Flashing (`launcher.exe` / `管理画面を開く.exe`)**:
+  * Lightweight native Windows GUI binaries eliminate the brief console window flash caused by running `powershell.exe` directly.
+* **GUI Privilege Toggling**:
+  * Check the "管理者" (Admin) box in the GUI to launch an app with elevated privileges (skipping UAC prompts). Unchecked items launch safely as a standard user via Explorer's `Shell.Application` COM interface.
+* **Custom Startup Ordering & Taskbar Readiness Wait**:
+  * Arrange startup order with "▲ Up" / "▼ Down" in the GUI. On logon, the launcher waits for `Shell_TrayWnd` before launching apps sequentially so system tray icons register reliably.
+* **Auto Tray-Minimize & Two-Stage Startup Profile (`auto_close_profile`)**:
+  * Automatically closes main windows after startup to keep apps minimized in the system tray (`auto_close_window`).
+  * **Built-in LINE preset in `config.default.json`**: Using `auto_close_profile.wait_process` (`LineMediaPlayer`), the closer waits until the main gate process is running before sending a close signal—preventing premature termination during splash-screen or initialization phases.
 * **Safe Watchdog (Default: OFF)**:
-  * Only applications with watchdog explicitly enabled are checked upon workstation unlock (`SessionUnlock`). Unmonitored applications are skipped to avoid accidental duplicate instances.
-* **GUI Process Picker**:
-  * Select from running processes with a point-and-click dialog to configure watchdog process names without manually editing JSON.
-* **Mutex Concurrency Control**:
-  * Named mutex (`Global\StartupFolderLauncher_Mutex`) guarantees only one instance runs during overlapping system triggers.
-* **Robust Japanese / Unicode Path Support**:
-  * Strict `-LiteralPath` throughout PowerShell scripts prevents errors with brackets or special characters.
-* **Automatic Log Rotation**:
-  * Logs entries in UTF-8 without BOM, automatically trimming older lines when exceeding configured limits.
+  * On workstation unlock (`SessionUnlock`), only apps explicitly enabled for monitoring are checked and restarted if closed. Includes a point-and-click Process Picker in the GUI.
+* **Concurrency Control, Unicode Path Safety & Log Rotation**:
+  * Uses a named mutex (`Global\StartupFolderLauncher_Mutex`), `-LiteralPath` throughout PowerShell scripts, and automatic line-count rotation for `launcher.log` (UTF-8 without BOM).
 
 ---
 
-## 2. Directory Structure
+## Package Structure
 
 ```text
 StartupFolderLauncher/
-├── スタートアップ/             # Place all shortcuts and executables here
+├── スタートアップ/             # Place shortcuts and executables to auto-launch
 │   └── .gitkeep
 ├── インストール.bat            # Setup: Double-click to register tasks (auto UAC elevation)
-├── アンインストール.bat        # Teardown: Double-click to unregister tasks (auto UAC elevation)
-├── 管理画面を開く.exe          # GUI: Double-click to open management control panel
+├── アンインストール.bat        # Teardown: Double-click to remove tasks (auto UAC elevation)
+├── 管理画面を開く.exe          # GUI: Open management control panel (no console flash)
 ├── launcher.exe                # Engine: Completely invisible native launcher
-├── config.default.json         # Configuration template (tracked in Git)
-├── config.json                 # Active configuration (auto-generated on first run, gitignored)
+├── config.default.json         # Template config (includes LINE auto_close_profile preset)
+├── config.json                 # Active config (auto-generated on first run)
 ├── launcher.ps1                # Main launcher engine script
-├── view_status.ps1             # GUI management application script (Windows Forms)
-├── scripts/
-│   ├── build_package.ps1       # Distribution ZIP builder script
-│   ├── launcher.cs             # launcher.exe C# source code
+├── view_status.ps1             # GUI management script (Windows Forms)
+├── scripts/                    # Internal helper scripts
 │   ├── register_task.ps1       # Task Scheduler registration script
-│   └── unregister_task.ps1     # Task Scheduler unregistration script
+│   ├── unregister_task.ps1     # Task Scheduler unregistration script
+│   └── window_closer.ps1       # Auto tray-minimize watcher script
 ├── launcher.log                # Execution log (auto-generated on first run)
+├── LICENSE                     # MIT License
 ├── README.md                   # Japanese documentation
 └── README.en.md                # English documentation
 ```
 
 ---
 
-## 3. Quick Setup
+## Setup & Uninstallation
 
-### 3.1 Installation (Task Scheduler)
-1. Extract or clone this folder to a permanent location (e.g. `C:\Tools\StartupFolderLauncher`).
-2. Double-click **`インストール.bat`**.
-3. Accept the UAC prompt.
-4. Two tasks will be automatically registered in Windows Task Scheduler:
-   * **`StartupFolderLauncher`**:
-     * Trigger: User Logon (`LogonTrigger`)
-     * Action: `launcher.exe`
-   * **`StartupFolderLauncher_Unlock`**:
-     * Trigger: Workstation Unlock (`SessionStateChangeTrigger` - SessionUnlock)
-     * Action: `launcher.exe -IsUnlockTrigger`
+### Register Scheduled Tasks
+Double-clicking `インストール.bat` registers two tasks in Windows Task Scheduler:
+* **`StartupFolderLauncher`**: Runs `launcher.exe` at user logon (`LogonTrigger`).
+* **`StartupFolderLauncher_Unlock`**: Runs `launcher.exe -IsUnlockTrigger` on workstation unlock (`SessionUnlock`).
 
-### 3.2 Uninstallation
-1. Double-click **`アンインストール.bat`** (auto UAC elevation).
-2. All registered tasks are cleanly removed.
+### Uninstall
+Double-click `アンインストール.bat` to remove both scheduled tasks cleanly.
 
 ---
 
-## 4. Usage
+## Configuration (`config.json` / `config.default.json`)
 
-### 4.1 Adding Applications
-* Place shortcuts (`.lnk`) or executables (`.exe`, `.bat`, `.cmd`) inside the `スタートアップ` folder.
-* Open `管理画面を開く.exe` to check the "管理者" (Admin) box if you want elevated privileges.
-
-### 4.2 Watchdog Behavior
-* **On Logon**:
-  * Launches all registered items sequentially according to `launch_order`. Running apps are skipped to prevent duplicates.
-* **On Unlock**:
-  * Only items with watchdog set to **ON** are checked and revived if terminated. Unmonitored items are skipped.
-
-### 4.3 Configuration (`config.json`)
-The active configuration is automatically saved when changed through the GUI.
+On first run, `config.json` is generated from `config.default.json`. Changes made in `管理画面を開く.exe` are saved automatically.
 
 ```json
 {
@@ -112,30 +82,55 @@ The active configuration is automatically saved when changed through the GUI.
     "stagger_interval_ms": 500,
     "logon_check_shell": true,
     "shell_timeout_sec": 30,
+    "auto_close_timeout_sec": 300,
     "max_log_lines": 200,
-    "window_width": 1040,
-    "window_height": 680,
+    "window_width": 860,
+    "window_height": 600,
     "launch_order": []
   },
-  "overrides": []
+  "overrides": [
+    {
+      "match_name": "LINE.lnk",
+      "enabled_watch": true,
+      "run_as_admin": false,
+      "auto_close_window": true,
+      "auto_close_profile": {
+        "wait_process": "LineMediaPlayer"
+      },
+      "watch_process_name": "LINE",
+      "arguments": "",
+      "hidden": false
+    }
+  ]
 }
 ```
 
-* **`config.default.json`**: Shipped template configuration.
-* **`config.json`**: Generated from template on first run. Stored locally and ignored by Git.
+### `settings`
+| Key | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `stagger_interval_ms` | Number | `500` | Delay in milliseconds between launching each item. |
+| `logon_check_shell` | Boolean | `true` | Wait for Windows taskbar readiness on logon. |
+| `shell_timeout_sec` | Number | `30` | Maximum wait timeout (seconds) for taskbar readiness. |
+| `auto_close_timeout_sec` | Number | `300` | Maximum timeout (seconds) for `window_closer.ps1` auto-close monitoring. |
+| `max_log_lines` | Number | `200` | Maximum lines retained in `launcher.log`. |
+| `window_width` | Number | `860` | Saved GUI window width (pixels, minimum 860). |
+| `window_height` | Number | `600` | Saved GUI window height (pixels, minimum 500). |
+| `launch_order` | Array | `[]` | Ordered list of item filenames to launch. |
+
+### `overrides`
+| Key | Description |
+| :--- | :--- |
+| `match_name` | Wildcard filename pattern (e.g., `LINE.lnk`, `Discord*`). |
+| `enabled_watch` | Enables unlock watchdog monitoring when `true` (default: `false`). |
+| `run_as_admin` | Launches with elevated privileges (skipping UAC) when `true`. |
+| `auto_close_window` | Automatically closes the main window after launch to minimize to tray. |
+| `auto_close_profile` | Profile for two-stage auto-close. `wait_process` delays closing until the specified gate process is running (e.g., `LineMediaPlayer` for LINE, preventing premature exit during splash-screen startup). |
+| `watch_process_name` | Process name (without `.exe`) to monitor. |
+| `arguments` | Additional command-line arguments. |
+| `hidden` | Launches the application with a hidden window when `true`. |
 
 ---
 
-## 5. Building Releases
-To generate a clean portable distribution ZIP package without affecting your local settings or shortcuts, run:
+## License
 
-```powershell
-pwsh scripts/build_package.ps1 -Version "v1.0.0"
-```
-
-The output package will be created in `dist/StartupFolderLauncher-v1.0.0.zip`.
-
----
-
-## 6. License
-MIT License.
+Released under the [MIT License](LICENSE).
